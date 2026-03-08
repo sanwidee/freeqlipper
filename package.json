@@ -1,0 +1,20 @@
+{
+  "name": "qlipper-ai",
+  "version": "1.8",
+  "description": "AI-powered video clipping tool",
+  "scripts": {
+    "build:web": "node build/web/build-web.js",
+    "build:installer": "echo 'Run this on Windows: iscc build/installer/qlipper-installer.iss'",
+    "dev:electron": "cd build/electron && npm install && npm start",
+    "build:electron-win": "cd build/electron && npm install && npm run build:win",
+    "build:electron-mac": "cd build/electron && npm install && npm run build:mac"
+  },
+  "keywords": [
+    "video",
+    "ai",
+    "clipping",
+    "youtube"
+  ],
+  "author": "Qlipper AI",
+  "license": "MIT"
+}
