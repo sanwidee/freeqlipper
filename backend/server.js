@@ -3,7 +3,9 @@ const cors = require('cors');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const modelRouter = require('./models');
 const axios = require('axios');
+const RssParser = require('rss-parser');
 require('dotenv').config();
+const parser = new RssParser();
 const { version: APP_VERSION } = require('./package.json');
 
 const { spawn, exec } = require('child_process');
@@ -17,6 +19,34 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // Initialize Gemini
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
+// ============================================================
+// FREE TIER: Daily usage counter (100 uses/day, then BYOK)
+// ============================================================
+const FREE_DAILY_LIMIT = 100;
+let freeUsage = { date: null, count: 0 };
+
+function getFreeApiKey() {
+    return process.env.FREE_GEMINI_KEY || null;
+}
+
+function checkAndConsumeFreeTier() {
+    const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    if (freeUsage.date !== today) {
+        freeUsage = { date: today, count: 0 }; // Reset daily
+    }
+    if (freeUsage.count < FREE_DAILY_LIMIT) {
+        freeUsage.count++;
+        return true; // OK to use free key
+    }
+    return false; // Limit hit, require user's key
+}
+
+function getRemainingFreeUses() {
+    const today = new Date().toISOString().slice(0, 10);
+    if (freeUsage.date !== today) return FREE_DAILY_LIMIT;
+    return Math.max(0, FREE_DAILY_LIMIT - freeUsage.count);
+}
 
 const path = require('path');
 const fs = require('fs');
@@ -66,7 +96,8 @@ const { parseTime, formatTime } = require('./utils/time');
 // ============================================================
 // LICENSE MIDDLEWARE (Server-side license verification)
 // ============================================================
-const { licenseCheck } = require('./middleware/license-check');
+// Free version: license check removed
+const licenseCheck = (req, res, next) => next();
 
 // ============================================================
 // TEXT WRAPPING HELPER (For FFmpeg drawtext overflow prevention)
@@ -921,7 +952,9 @@ const ytdlpJsonWithStrategy = (url, strategyIndex, extraArgs = []) => {
                     reject(new Error(`JSON parse failed: ${e.message}`));
                 }
             } else {
-                reject({ code, stderr, is403: stderr.toLowerCase().includes('403') || stderr.includes('HTTP Error 403') });
+                const is403 = stderr.toLowerCase().includes('403') || stderr.includes('HTTP Error 403') ||
+                    stderr.toLowerCase().includes('sign in to confirm') || stderr.toLowerCase().includes('not a bot');
+                reject({ code, stderr, is403 });
             }
         });
         proc.on('error', err => reject(new Error(`Spawn error: ${err.message}`)));
@@ -1081,7 +1114,9 @@ const ytdlpDownloadWithRetry = async (url, outputPath, extraArgs = [], onProgres
                         // Check if it's a 403 error
                         const is403 = stderrBuffer.toLowerCase().includes('403') ||
                             stderrBuffer.includes('HTTP Error 403') ||
-                            stderrBuffer.toLowerCase().includes('forbidden');
+                            stderrBuffer.toLowerCase().includes('forbidden') ||
+                            stderrBuffer.toLowerCase().includes('sign in to confirm') ||
+                            stderrBuffer.toLowerCase().includes('not a bot');
                         // Check if it's a format-not-available error (different clients serve different formats)
                         const isFormatError = stderrBuffer.toLowerCase().includes('requested format') ||
                             stderrBuffer.toLowerCase().includes('format not available') ||
@@ -2059,11 +2094,26 @@ app.post('/api/analyze', licenseCheck, async (req, res) => {
         'deepseek': 'x-deepseek-key'
     };
     const headerKey = headerKeyMap[model] || 'x-gemini-key';
-    const apiKey = req.headers[headerKey] || req.headers['x-gemini-key']; // Fallback for backwards compat
+    let apiKey = req.headers[headerKey] || req.headers['x-gemini-key']; // Fallback for backwards compat
+    let usingFreeKey = false;
 
     if (!url) return res.status(400).json({ error: "YouTube URL is required" });
+
+    // Free tier: if no user key provided, try the shared free key
     if (!apiKey || apiKey === 'your_key_here') {
-        return res.status(400).json({ error: `API Key for ${model} is missing. Please provide it in Settings.` });
+        const freeKey = getFreeApiKey();
+        if (freeKey && checkAndConsumeFreeTier()) {
+            apiKey = freeKey;
+            usingFreeKey = true;
+        } else if (freeKey) {
+            return res.status(429).json({
+                error: `Free daily limit of ${FREE_DAILY_LIMIT} uses reached. Add your own API key in Settings to continue.`,
+                limitReached: true,
+                remaining: 0
+            });
+        } else {
+            return res.status(400).json({ error: `API Key for ${model} is missing. Please provide it in Settings.` });
+        }
     }
 
     try {
@@ -2246,6 +2296,19 @@ const activeJobs = {}; // { jobId: { status, progress, clips: [] } }
 app.post('/api/video/process', licenseCheck, async (req, res) => {
     let { videoPath, config, outputFormat, outputResolution, useTransitions, turboMode, styleSettings } = req.body;
     outputResolution = outputResolution || '720p'; // Default to 720p
+
+    // Free version: enforce 16:9 formats only
+    const allowed16x9Formats = ['raw-cuts', 'face-track-zoom-landscape', 'landscape-blur', 'landscape-blur-motion', 'letterbox'];
+    if (!allowed16x9Formats.includes(outputFormat)) {
+        outputFormat = 'raw-cuts';
+    }
+
+    // Free version: force-disable subtitle and hook
+    if (styleSettings) {
+        styleSettings.subtitleEnabled = false;
+        styleSettings.hookEnabled = false;
+    }
+
     const dims = getResolutionDimensions(outputResolution, outputFormat);
     console.log(`[DEBUG] Received process request: Format = ${outputFormat} Resolution = ${outputResolution} (${dims.w}x${dims.h}) Turbo = ${turboMode} Path = ${videoPath} StyleSettings = ${styleSettings ? 'yes' : 'no'}`);
 
@@ -3079,7 +3142,7 @@ app.post('/api/test-key', async (req, res) => {
     if (!apiKey) return res.status(400).json({ error: "Key required" });
     try {
         const dynamicGenAI = new GoogleGenerativeAI(apiKey);
-        const model = dynamicGenAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+        const model = dynamicGenAI.getGenerativeModel({ model: "gemini-flash-latest" });
         const result = await model.generateContent("Respond with 'OK'");
         const response = await result.response;
         res.json({ status: "ok", message: response.text() });
@@ -3230,6 +3293,8 @@ app.patch('/api/history/:projectId/clips/:clipIdx', (req, res) => {
 
 // POST: Re-render a single clip with new style/format
 app.post('/api/video/reprocess-single', licenseCheck, async (req, res) => {
+    // Free version: edit/reprocess is disabled
+    return res.status(403).json({ error: 'Edit is not available in the Free version. Upgrade to Qlipper Pro.' });
     const { projectId, clipIdx, outputFormat, outputResolution = '720p', styleSettings, turboMode = true } = req.body;
     const dims = getResolutionDimensions(outputResolution, outputFormat);
     console.log(`[REPROCESS] Resolution: ${outputResolution} (${dims.w}x${dims.h})`);
@@ -5491,6 +5556,15 @@ app.get('/version', (req, res) => {
 
 app.get('/api/version', (req, res) => {
     res.json({ version: APP_VERSION, name: 'Qlipper AI' });
+});
+
+// Free tier usage status
+app.get('/api/free-usage', (req, res) => {
+    res.json({
+        limit: FREE_DAILY_LIMIT,
+        remaining: getRemainingFreeUses(),
+        hasFreeTier: !!getFreeApiKey()
+    });
 });
 
 // SPA fallback - serve index.html for any non-API routes

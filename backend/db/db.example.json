@@ -1,0 +1,10 @@
+[
+    {
+        "id": "example_project_id",
+        "timestamp": "2024-01-01T00:00:00.000Z",
+        "promptConfig": {},
+        "sourceVideo": "assets/example.mp4",
+        "clips": [],
+        "status": "completed"
+    }
+]
