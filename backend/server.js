@@ -21,9 +21,9 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // ============================================================
-// FREE TIER: Daily usage counter (100 uses/day, then BYOK)
+// FREE TIER: Daily usage counter (20 uses/day, then BYOK)
 // ============================================================
-const FREE_DAILY_LIMIT = 100;
+const FREE_DAILY_LIMIT = 20;
 let freeUsage = { date: null, count: 0 };
 
 function getFreeApiKey() {
